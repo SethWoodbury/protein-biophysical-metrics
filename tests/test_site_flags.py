@@ -83,7 +83,7 @@ class SiteFlagTests(TestCase):
                     self.assertEqual((result["degron_tag_count"], result["degron_motif_count"]), (0, 0))
         for motif in ("LAA", "VAA", "AA", "RRKKAI"):
             details = {}
-            result = describe_sites("SG" + motif, details=details)
+            result = describe_sites("SG" + motif, proteases_used=(), details=details)
             self.assertEqual((result["degron_tag_count"], result["degron_motif_count"]), (0, 1))
             site, = details["site_flags"]["sites"]
             self.assertEqual(site["matched_sequence"], motif)
@@ -113,6 +113,7 @@ class SiteFlagTests(TestCase):
             32: ("factor-xa", "IEGRV", False, False),
         })
         self.assertEqual(result["protease_cut_site_count"], 3)
+        self.assertEqual(describe_sites(sequence)["protease_cut_site_count"], 5)
         self.assertIsNone(describe_sites(sequence, proteases_used=())["protease_cut_site_count"])
         self.assertEqual(describe_sites("AAA", proteases_used=("tev",))["protease_cut_site_count"], 0)
 
@@ -133,16 +134,16 @@ class SiteFlagTests(TestCase):
         hits = details["site_flags"]["sites"]
         self.assertEqual({site["protease"] for site in hits if site["cleavage_after"] == 10}, {"tev", "enterokinase"})
 
-    def test_bl21_default_tev_and_optional_ompt_candidates(self):
+    def test_bl21_all_proteases_default_to_separate_counts(self):
         sequence = "AENLYFQGAKKRRA"
         details = {}
         result = describe_sites(sequence, details=details)
         self.assertEqual(result["protease_cut_site_count"], 1)
-        self.assertNotIn("context_dependent_protease_site_count", result)
+        self.assertEqual(result["context_dependent_protease_site_count"], 3)
         flags = details["site_flags"]
         self.assertEqual(flags["organism"], DEFAULT_ORGANISM)
-        self.assertEqual(flags["proteases_used"], ["tev"])
-        tev, = flags["sites"]
+        self.assertEqual(flags["proteases_used"], ["tev", "hrv-3c", "thrombin", "enterokinase", "factor-xa", "ompt"])
+        tev, = (site for site in flags["sites"] if site["protease"] == "tev")
         self.assertEqual(tev["bin"], "workflow_protease")
 
         result = describe_sites(sequence, proteases_used="TEV,OmpT", intended_cuts=(11,), details=details)
@@ -159,6 +160,13 @@ class SiteFlagTests(TestCase):
         self.assertEqual(result["context_dependent_protease_site_count"], 3)
         self.assertEqual(describe_sites("AA", proteases_used="ompt")["context_dependent_protease_site_count"], 0)
         self.assertIsNone(describe_sites(sequence, proteases_used="NONE")["protease_cut_site_count"])
+
+    def test_proteases_can_be_excluded_individually(self):
+        details = {}
+        result = describe_sites("AENLYFQGAKKRRA", exclude_proteases="TEV,OmpT", details=details)
+        self.assertEqual(result["protease_cut_site_count"], 0)
+        self.assertNotIn("context_dependent_protease_site_count", result)
+        self.assertEqual(details["site_flags"]["proteases_used"], ["hrv-3c", "thrombin", "enterokinase", "factor-xa"])
 
     def test_organism_specific_rules_can_be_replaced(self):
         profile = OrganismProfile(name="other_host")

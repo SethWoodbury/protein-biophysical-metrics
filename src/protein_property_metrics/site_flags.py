@@ -33,19 +33,12 @@ _CHEMICAL_PATTERN = re.compile(r"NG|DG|NS|DP")
 _PROLINE_PATTERN = re.compile(r"(?=(PPP|PPG))")
 _PROLINE_RUN = re.compile(r"P+")
 
-def normalize_proteases(
-    proteases_used: Iterable[str] | str | None = None,
-    *,
-    organism: str | OrganismProfile = DEFAULT_ORGANISM,
-) -> tuple[str, ...]:
-    """Resolve host defaults or an explicit ordered enzyme selection."""
-    profile = get_organism(organism)
-    if proteases_used is None:
-        proteases_used = profile.default_proteases
-    if isinstance(proteases_used, str):
-        proteases_used = proteases_used.split(",") if proteases_used.strip() else ()
+
+def _parse_protease_names(names: Iterable[str] | str, profile: OrganismProfile) -> tuple[str, ...]:
+    if isinstance(names, str):
+        names = names.split(",") if names.strip() else ()
     selected = {}
-    for name in proteases_used:
+    for name in names:
         canonical = name.strip().lower().replace(" ", "-") if isinstance(name, str) else None
         if canonical != "none" and canonical not in profile.proteases:
             choices = ", ".join((*profile.proteases, "none"))
@@ -56,6 +49,21 @@ def normalize_proteases(
             raise ValueError("use 'none' alone to disable protease scanning")
         return ()
     return tuple(selected)
+
+
+def normalize_proteases(
+    proteases_used: Iterable[str] | str | None = None,
+    *,
+    organism: str | OrganismProfile = DEFAULT_ORGANISM,
+    exclude_proteases: Iterable[str] | str = (),
+) -> tuple[str, ...]:
+    """Resolve host defaults or an explicit list, then apply opt-outs."""
+    profile = get_organism(organism)
+    selected = _parse_protease_names(profile.default_proteases if proteases_used is None else proteases_used, profile)
+    if not exclude_proteases:
+        return selected
+    excluded = set(_parse_protease_names(exclude_proteases, profile))
+    return tuple(enzyme for enzyme in selected if enzyme not in excluded)
 
 
 def validate_positions(positions: Iterable[int], maximum: int, name: str) -> set[int]:
@@ -100,6 +108,7 @@ def describe_sites(
     sequence: str,
     *,
     proteases_used: Iterable[str] | str | None = None,
+    exclude_proteases: Iterable[str] | str = (),
     organism: str | OrganismProfile = DEFAULT_ORGANISM,
     intended_cuts: Iterable[int] = (),
     protected_positions: Iterable[int] = (),
@@ -114,6 +123,7 @@ def describe_sites(
     use 1-based sequence coordinates. Optional total residue SASA is supplied in
     sequence order. A true mature_n_terminus declares the first residue exposed.
     Omitted proteases use the host defaults. An empty selection disables scans.
+    Exclusions remove enzymes from either selection.
     Workflow recognition motifs and context-dependent candidates are counted separately.
     """
     length = len(sequence)
@@ -122,7 +132,7 @@ def describe_sites(
     if not isinstance(mature_n_terminus, bool) or not isinstance(free_c_terminus, bool):
         raise ValueError("terminal declarations must be Boolean")
     profile = get_organism(organism)
-    selected = normalize_proteases(proteases_used, organism=profile)
+    selected = normalize_proteases(proteases_used, organism=profile, exclude_proteases=exclude_proteases)
     intended_positions = validate_positions(intended_cuts, length - 1, "intended cut")
     protected = validate_positions(protected_positions, length, "protected residue")
     exposure = None

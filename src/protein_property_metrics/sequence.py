@@ -71,6 +71,7 @@ def describe(
     nfive_model: str | Path | None = None,
     nfive_lookup: str | Path | None = None,
     proteases_used: Iterable[str] | str | None = None,
+    exclude_proteases: Iterable[str] | str = (),
     intended_cuts: Iterable[int] = (),
     protected_positions: Iterable[int] = (),
     mature_n_terminus: bool = False,
@@ -101,7 +102,8 @@ def describe(
     protease settings. The pI-typicality group gives a local-density percentile.
     SWI is the mean of the original residue solubility weights. Site flags
     include chemical, proline and protease motifs. A None proteases_used uses
-    the profile defaults. Pass an empty iterable to disable protease scanning.
+    the profile defaults. Pass an empty iterable to disable protease scanning
+    or use exclude_proteases to remove selected enzymes.
     Intended cuts identify the residue before each bond, and protected
     positions identify residues. Both use 1-based coordinates. Declare
     mature_n_terminus for an exposed mature N-end and set free_c_terminus
@@ -113,7 +115,8 @@ def describe(
     return _describe_normalized(
         normalize_sequence(sequence), groups=groups, ph=ph, organism=organism,
         nfive_model=nfive_model, nfive_lookup=nfive_lookup,
-        proteases_used=proteases_used, annotations=annotations, secondary_structure=secondary_structure,
+        proteases_used=proteases_used, exclude_proteases=exclude_proteases,
+        annotations=annotations, secondary_structure=secondary_structure,
         residue_sasa_a2=residue_sasa_a2, details=details,
     )
 
@@ -128,6 +131,7 @@ def _describe_normalized(
     nfive_lookup: str | Path | None = None,
     nfive_scores: Mapping[str, float] | None = None,
     proteases_used: Iterable[str] | str | None = None,
+    exclude_proteases: Iterable[str] | str = (),
     annotations: SiteAnnotations = SiteAnnotations(),
     secondary_structure: str | None = None,
     residue_sasa_a2: Sequence[float | None] | None = None,
@@ -185,7 +189,8 @@ def _describe_normalized(
         metrics["swi_solubility_index"] = fsum(counts[aa] * weight for aa, weight in _SWI_WEIGHTS.items()) / len(sequence)
     if SITE_FLAGS_GROUP in selected:
         metrics.update(describe_sites(
-            sequence, organism=profile, proteases_used=proteases_used, intended_cuts=annotations.intended_cuts,
+            sequence, organism=profile, proteases_used=proteases_used, exclude_proteases=exclude_proteases,
+            intended_cuts=annotations.intended_cuts,
             protected_positions=annotations.protected_positions, mature_n_terminus=annotations.mature_n_terminus,
             free_c_terminus=annotations.free_c_terminus, residue_sasa_a2=residue_sasa_a2, details=details,
         ))

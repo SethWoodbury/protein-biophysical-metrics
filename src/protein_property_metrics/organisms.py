@@ -66,19 +66,21 @@ WORKFLOW_PROTEASE_RULES = {
     "factor-xa": ProteaseRule("I[ED]GR[^PR]", 4, _WORKFLOW_PROTEASE_SOURCE),
 }
 
+_BL21_PROTEASE_RULES = {
+    **WORKFLOW_PROTEASE_RULES,
+    # Ordinary BL21(DE3) is OmpT-deficient. These are context candidates.
+    "ompt": ProteaseRule(
+        "[KR][KR]", 1, "https://pmc.ncbi.nlm.nih.gov/articles/PMC516829/",
+        category=CONTEXT_DEPENDENT_PROTEASE,
+        interpretation="Potential dibasic site when active OmpT is present",
+    ),
+}
+
 
 _BL21_DE3 = OrganismProfile(
     name=DEFAULT_ORGANISM,
-    proteases={
-        **WORKFLOW_PROTEASE_RULES,
-        # Wild-type OmpT prefers dibasic sites. Ordinary BL21(DE3) is OmpT-deficient.
-        "ompt": ProteaseRule(
-            "[KR][KR]", 1, "https://pmc.ncbi.nlm.nih.gov/articles/PMC516829/",
-            category=CONTEXT_DEPENDENT_PROTEASE,
-            interpretation="Potential dibasic site when active OmpT is present",
-        ),
-    },
-    default_proteases=("tev",),
+    proteases=_BL21_PROTEASE_RULES,
+    default_proteases=tuple(_BL21_PROTEASE_RULES),
     complete_degrons=tuple(
         DegronRule(motif, name, source, "ClpXP", "Complete C-terminal ssrA tag")
         for motif, name, source in (

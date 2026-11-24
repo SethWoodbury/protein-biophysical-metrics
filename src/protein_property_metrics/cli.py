@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import shutil
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
@@ -16,6 +17,8 @@ from tempfile import TemporaryDirectory
 
 from Bio import SeqIO
 
+from .dssp import DEFAULT_DSSP_EXECUTABLE, DEFAULT_DSSP_TIMEOUT
+from .helix import HELIX_GROUP
 from .nfive import (
     DEFAULT_MODEL_PATH, MET_EXCISION_PREFIX, N_DEGRON_STABILITY_GROUP, nfive_windows, prepare_nfive_scores,
 )
@@ -152,6 +155,7 @@ def _parser() -> argparse.ArgumentParser:
         "--proteases-used",
         help="Override the host's protease list for site-flags with comma-separated names or 'none'.",
     )
+    parser.add_argument("--exclude-proteases", help="Comma-separated proteases to skip in site-flags.")
     parser.add_argument("--intended-cuts", help="Comma-separated 1-based positions immediately before intended cuts.")
     parser.add_argument("--protected-positions", help="Comma-separated 1-based protected residue positions.")
     parser.add_argument(
@@ -162,6 +166,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Declare a blocked C-end. The default is free.",
     )
     parser.add_argument("--secondary-structure", help="Supplied per-residue DSSP assignment string for the input.")
+    parser.add_argument(
+        "--dssp", nargs="?", const=DEFAULT_DSSP_EXECUTABLE, metavar="EXECUTABLE",
+        help="Run mkdssp for helix on matching coordinates when assignments are absent. Optionally give an executable path.",
+    )
+    parser.add_argument(
+        "--dssp-timeout", type=_positive_float, default=DEFAULT_DSSP_TIMEOUT, metavar="SECONDS",
+        help=f"Time limit for each DSSP call. The default is {DEFAULT_DSSP_TIMEOUT:g} seconds.",
+    )
     parser.add_argument("--workers", type=_positive_int, default=1, help="Worker processes. The default is 1.")
     parser.add_argument("--output", "--csv", required=True, type=Path, help="Output CSV path")
     parser.add_argument("--jsonl", type=Path, help="Optional output JSON Lines path")
@@ -295,6 +307,8 @@ def _describe(
     organism: str,
     proteases_used: tuple[str, ...],
     include_details: bool,
+    dssp_executable: str | None,
+    dssp_timeout: float,
 ) -> list[dict[str, object]]:
     sequence_groups = tuple(group for group in groups if group in SEQUENCE_GROUPS)
     surface_groups = tuple(group for group in groups if group in SURFACE_GROUPS)
@@ -304,18 +318,21 @@ def _describe(
             details = {"sequence": record.sequence, "organism": organism} if include_details else None
             surface = dict.fromkeys(SURFACE_CHEMISTRY_FIELDS) if "surface-chemistry" in surface_groups else {}
             exposure = None
-            if surface_groups and record.structure is not None:
-                exposure = [] if include_details and SITE_FLAGS_GROUP in sequence_groups else None
+            run_dssp = dssp_executable is not None and record.structure is not None and record.secondary_structure is None
+            if record.structure is not None and (surface_groups or run_dssp):
+                exposure = [] if surface_groups and include_details and SITE_FLAGS_GROUP in sequence_groups else None
                 surface = describe_structure(
                     record.structure, chain=record.chain, expected_sequence=record.sequence,
                     radius=radius, sasa_points=sasa_points, groups=surface_groups,
                     details=details, residue_sasa_a2=exposure,
                     protected_positions=record.annotations.protected_positions,
+                    dssp_executable=dssp_executable if run_dssp else None, dssp_timeout=dssp_timeout,
                 )
             elif details is not None and "surface-chemistry" in surface_groups:
                 details["surface"] = {"reason": "structure_unavailable"}
+            record_groups = tuple(group for group in sequence_groups if group != HELIX_GROUP) if run_dssp else sequence_groups
             properties = _describe_normalized(
-                record.sequence, groups=sequence_groups, ph=ph, organism=organism, nfive_scores=nfive_scores,
+                record.sequence, groups=record_groups, ph=ph, organism=organism, nfive_scores=nfive_scores,
                 annotations=record.annotations, proteases_used=proteases_used, secondary_structure=record.secondary_structure,
                 residue_sasa_a2=exposure, details=details,
             )
@@ -356,14 +373,22 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("context names must be unique")
         if args.details and args.jsonl is None:
             raise ValueError("--details requires --jsonl")
+        if args.dssp is not None and HELIX_GROUP not in args.groups:
+            raise ValueError(f"--dssp requires the {HELIX_GROUP} group")
         profile = get_organism(args.organism)
         if args.proteases_used is not None and SITE_FLAGS_GROUP not in args.groups:
             raise ValueError(f"--proteases-used requires the {SITE_FLAGS_GROUP} group")
+        if args.exclude_proteases is not None and SITE_FLAGS_GROUP not in args.groups:
+            raise ValueError(f"--exclude-proteases requires the {SITE_FLAGS_GROUP} group")
         if N_DEGRON_STABILITY_GROUP in args.groups and not profile.nfive_supported:
             raise ValueError(f"{profile.name} has no registered N-FIVE model")
         if PI_TYPICALITY_GROUP in args.groups and profile.pi_reference is None:
             raise ValueError(f"{profile.name} has no pI reference cohort")
-        proteases_used = normalize_proteases(args.proteases_used, organism=profile) if SITE_FLAGS_GROUP in args.groups else ()
+        proteases_used = ()
+        if SITE_FLAGS_GROUP in args.groups:
+            proteases_used = normalize_proteases(
+                args.proteases_used, organism=profile, exclude_proteases=args.exclude_proteases or (),
+            )
         records = _records(args)
         structures = {record.structure for record in records if record.structure is not None}
         if "sap" in args.groups and not structures:
@@ -376,6 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             inputs.add((args.nfive_model or DEFAULT_MODEL_PATH).expanduser().resolve())
         if args.nfive_lookup is not None:
             inputs.add(args.nfive_lookup.expanduser().resolve())
+        if args.dssp is not None and (executable_path := shutil.which(args.dssp)):
+            inputs.add(Path(executable_path).resolve())
         if len(set(outputs)) != len(outputs) or inputs.intersection(outputs):
             raise ValueError("output paths must be distinct from each other and from inputs")
         if any(path.exists() and not path.is_file() for path in outputs):
@@ -402,6 +429,7 @@ def main(argv: list[str] | None = None) -> int:
         describe_record = partial(
             _describe, groups=args.groups, ph=args.ph, radius=args.radius, sasa_points=args.sasa_points,
             organism=profile.name, proteases_used=proteases_used, include_details=args.details,
+            dssp_executable=args.dssp, dssp_timeout=args.dssp_timeout,
         )
         if args.workers == 1:
             rows = [

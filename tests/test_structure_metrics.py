@@ -3,12 +3,14 @@
 import json
 from math import fsum
 from pathlib import Path
+from subprocess import CompletedProcess, TimeoutExpired
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
 from Bio.SeqUtils.ProtParamData import bm
 
+from protein_property_metrics import surface
 from protein_property_metrics.cli import main
 from protein_property_metrics.helix import describe_helix
 from protein_property_metrics.surface import ShrakeRupley, describe_structure
@@ -158,3 +160,75 @@ class HelixTests(TestCase):
             describe_helix("GGGGGGGG", "HHHHHHH")
         with self.assertRaisesRegex(ValueError, "unsupported"):
             describe_helix("GGGGGGGG", "HHHHHHHX")
+
+    @staticmethod
+    def dssp_summary(codes: str) -> str:
+        header = (
+            "data_dssp\nloop_\n_dssp_struct_summary.label_asym_id\n_dssp_struct_summary.label_seq_id\n"
+            "_dssp_struct_summary.label_comp_id\n_dssp_struct_summary.secondary_structure\n"
+        )
+        return header + "".join(
+            f"A {position} {'ASP' if position <= 4 else 'LYS'} {code}\n"
+            for position, code in enumerate(codes, 1)
+        )
+
+    @staticmethod
+    def write_helix_input(path: Path) -> None:
+        _write_chain(path, [("ASP", ("CB", "CG", "OD1", "OD2"))] * 4 + [("LYS", ("CB", "CG", "CD", "CE", "NZ"))] * 4)
+
+    def test_cli_dssp_uses_coordinates_without_sasa_and_preserves_caller_assignments(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "input.pdb"
+            self.write_helix_input(path)
+            jsonl = root / "metrics.jsonl"
+            args = [
+                "--sequence", "DDDDKKKK", "--structure", str(path), "--groups", "helix", "--dssp",
+                "--context", "tagged:MSG:", "--jsonl", str(jsonl), "--details", "--output", str(root / "metrics.csv"),
+            ]
+            result = CompletedProcess([], 0, stdout=self.dssp_summary("H" * 8), stderr="")
+            with (
+                patch("protein_property_metrics.dssp.subprocess.run", return_value=result) as dssp,
+                patch.object(ShrakeRupley, "compute") as compute,
+            ):
+                main(args)
+                base, tagged = map(json.loads, jsonl.read_text().splitlines())
+                self.assertEqual(base["helix_end_charge_compatibility"], 2.0)
+                self.assertEqual(base["details"]["helix"]["assignment_source"], "dssp")
+                self.assertIsNone(tagged["helix_end_charge_compatibility"])
+                main([*args, "--secondary-structure", "........"])
+                supplied, _ = map(json.loads, jsonl.read_text().splitlines())
+                self.assertIsNone(supplied["helix_end_charge_compatibility"])
+                dssp.assert_called_once()
+                compute.assert_not_called()
+
+    def test_dssp_requires_complete_assignments_and_keeps_structure_validation(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "input.pdb"
+            self.write_helix_input(path)
+            result = CompletedProcess([], 0, stdout=self.dssp_summary("H" * 7), stderr="")
+            with patch("protein_property_metrics.dssp.subprocess.run", return_value=result) as dssp:
+                with self.assertRaisesRegex(ValueError, "DSSP.*cover"):
+                    describe_structure(path, groups=(), dssp_executable="mkdssp", expected_sequence="DDDDKKKK")
+                with self.assertRaisesRegex(ValueError, "Sequence mismatch"):
+                    describe_structure(path, groups=(), dssp_executable="mkdssp", expected_sequence="GGGGGGGG")
+                dssp.assert_called_once()
+
+    def test_combined_dssp_shares_structure_parsing_and_enforces_timeout(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "input.pdb"
+            self.write_helix_input(path)
+            result = CompletedProcess([], 0, stdout=self.dssp_summary("H" * 8), stderr="")
+            with (
+                patch("protein_property_metrics.dssp.subprocess.run", return_value=result) as dssp,
+                patch.object(surface, "_load_protein_chain", wraps=surface._load_protein_chain) as load,
+            ):
+                metrics = describe_structure(path, dssp_executable="mkdssp", dssp_timeout=2.0, sasa_points=64)
+                self.assertEqual(metrics["helix_end_charge_compatibility"], 2.0)
+                self.assertIn("sap_static_total", metrics)
+                self.assertEqual(dssp.call_args.kwargs["timeout"], 2.0)
+                load.assert_called_once()
+            error = TimeoutExpired(["mkdssp"], timeout=2.0)
+            with patch("protein_property_metrics.dssp.subprocess.run", side_effect=error):
+                with self.assertRaisesRegex(ValueError, "DSSP exceeded the 2-second timeout"):
+                    describe_structure(path, groups=(), dssp_executable="mkdssp", dssp_timeout=2.0)

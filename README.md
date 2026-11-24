@@ -25,7 +25,7 @@ their construct-relative coordinates. Plain `--jsonl PATH` writes scalar rows.
 | `optics` | Estimated 280 nm extinction coefficients for reduced and maximum disulfide-paired cases in M⁻¹ cm⁻¹ |
 | `n-degron-stability-index` | Five-residue N-terminal windows and predicted Protein Stability Index (PSI) from N-FIVE. Lower PSI means a more destabilizing N-terminus. |
 | `swi` | `swi_solubility_index`, the unitless sequence mean of the original SWI weights. Higher means higher model soluble propensity. |
-| `site-flags` | `ng_count`, `dg_count`, `ns_count`, `polyproline_cluster_count`, `degron_tag_count`, `degron_motif_count`, workflow `protease_cut_site_count`, and opt-in `context_dependent_protease_site_count`. |
+| `site-flags` | `ng_count`, `dg_count`, `ns_count`, `polyproline_cluster_count`, `degron_tag_count`, `degron_motif_count`, workflow `protease_cut_site_count`, and `context_dependent_protease_site_count`. |
 | `aggrescan` | `aggrescan_na4vss`, normalized global profile score, and `aggrescan_thsar`, hotspot area per residue in model units. Higher means greater model aggregation propensity. |
 | `helix` | `helix_end_charge_compatibility`, mean C-end charge minus mean N-end charge over eligible helices, in elementary-charge units per residue. |
 | `sap` | Static SAP approximation, total, per-residue and side-chain SASA in Å², Cα radius of gyration in Å, and covered residues |
@@ -114,18 +114,17 @@ free-end default. The match counts describe sequence context.
 [C-terminal ClpX signals](https://pmc.ncbi.nlm.nih.gov/articles/PMC517522/) ·
 [MuA recognition](https://doi.org/10.1016/j.jmb.2015.03.008)
 
-`site-flags` checks TEV motifs by default in the BL21(DE3) profile. Use
-`--proteases-used none` to disable protease scans, or select an explicit set
-from `tev,hrv-3c,thrombin,enterokinase,factor-xa,ompt`. The explicit list
-replaces the default. `protease_cut_site_count` counts distinct unexpected
-canonical bonds for selected workflow enzymes and is blank/null if none
-are selected. OmpT is opt-in because ordinary BL21(DE3) is OmpT-deficient.
-Use `--proteases-used tev,ompt` to keep TEV and also report potential OmpT
-dibasic bonds (`RR`, `RK`, `KR`, `KK`) separately in
-`context_dependent_protease_site_count`. Both counts return zero after an
-enabled scan with no unexpected matches. These are motif matches, and actual
-cleavage depends on enzyme exposure and substrate context. The registry
-covers canonical motifs, and off-target cleavage can occur outside them.
+The BL21(DE3) profile enables `tev,hrv-3c,thrombin,enterokinase,factor-xa,ompt`
+by default when `site-flags` is selected. Use `--exclude-proteases ompt,thrombin`
+to skip individual scans, `--proteases-used none` to disable all protease scans,
+or `--proteases-used` with an explicit list to replace the default. The Python
+API accepts `exclude_proteases` and `proteases_used` with the same semantics.
+`protease_cut_site_count` counts distinct unexpected canonical bonds for
+selected workflow enzymes and is blank/null if none are selected. BL21(DE3)
+is OmpT-deficient. Its default OmpT scan reports dibasic candidates (`RR`,
+`RK`, `KR`, `KK`) separately in `context_dependent_protease_site_count`.
+Both counts return zero after an enabled scan with no unexpected matches.
+Actual cleavage depends on enzyme exposure and substrate context.
 
 Details keep enzyme identities and intended matches. Positions are 1-based.
 Intended cuts name the residue immediately before the bond. Protected
@@ -146,7 +145,8 @@ per residue and compares the first and last four residues of each contiguous
 `H` run of at least eight residues. Asp/Glu contribute −1, Lys/Arg +1, and
 all other residues 0. Higher values indicate greater compatibility under
 this convention. Missing assignments or the absence of eligible helices
-return null with a reason in details.
+return null with a reason in details. Use `--dssp` to obtain assignments
+from the coordinates when a row has no supplied assignment.
 
 SWI uses an independently implemented arithmetic mean and the released
 three-decimal residue weights credited to Bikash K. Bhandari, Chun Shen Lim,
@@ -215,6 +215,19 @@ protein-biophysical-metrics --manifest structures.csv --groups sap,surface-chemi
   --output surface.csv --jsonl surface.jsonl --details
 ```
 
+Use `--groups helix --dssp` with PDB or mmCIF coordinates to run an installed
+`mkdssp` with per-residue mmCIF output. The wrapper was verified with version
+4.5.7. With `--dssp /path/to/mkdssp` you can select the
+executable, and `--dssp-timeout` sets the per-call limit in seconds (default 30).
+Supplied secondary structure takes precedence. The wrapper assigns the isolated
+selected chain and verifies one assignment per residue against its sequence.
+Helix-only runs skip SASA. [mkdssp documentation](https://github.com/PDB-REDO/dssp/blob/trunk/doc/mkdssp.md)
+
+```sh
+protein-biophysical-metrics --manifest structures.csv --groups helix,site-flags \
+  --dssp --exclude-proteases ompt --output metrics.csv --jsonl metrics.jsonl --details
+```
+
 The static SAP approximation uses atom-centered neighborhoods, accessible
 side-chain surface and a glycine-centered hydrophobicity scale. The default
 SAP radius is 5 Å. SASA uses Shrake–Rupley on the isolated canonical heavy-atom
@@ -230,10 +243,14 @@ definition. [SAP definition](https://doi.org/10.1073/pnas.0904191106) ·
 
 SAP and surface chemistry share a single atom-level SASA calculation. The
 scope is the isolated canonical heavy-atom chain. Waters, metals, other
-ligands and other chains are excluded from SASA. Modified residues in the
-selected polymer, incomplete heavy-atom coverage and sequence mismatches
-raise errors. Explicit PDB/mmCIF sulfur connections can appear in details
-as chemical context. Sulfur totals are static exposure burdens. A covered
+ligands and other chains are excluded from SASA. Modified residues such as
+carbamylated lysine (`KCX`) in the selected polymer, incomplete heavy-atom
+coverage and sequence mismatches raise errors. Explicit PDB/mmCIF sulfur
+connections can appear in details as chemical context. For a metallohydrolase,
+sequence pI and charge treat an encoded `K` as canonical lysine with free
+termini. The isolated-chain surface metrics describe that canonical atom
+selection. The carbamylated, metal-bound enzyme has a different chemical
+environment. Sulfur totals are static exposure burdens. A covered
 chain without a residue type gives zero for that type. Missing coordinates
 give null. Hydrophobic burial uses glycine-centered positive Black–Mould
 weights and clips exposed side-chain area divided by the reference area to

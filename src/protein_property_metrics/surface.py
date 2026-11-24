@@ -23,6 +23,8 @@ from Bio.PDB.StructureBuilder import StructureBuilder
 from Bio.PDB.kdtrees import KDTree
 from Bio.SeqUtils.ProtParamData import bm
 
+from .dssp import DEFAULT_DSSP_TIMEOUT, assign_dssp
+from .helix import describe_helix
 from .site_flags import validate_positions
 
 DEFAULT_RADIUS = 5.0
@@ -30,6 +32,7 @@ DEFAULT_SASA_POINTS = 960
 SURFACE_GROUPS = ("sap", "surface-chemistry")
 SURFACE_CHEMISTRY_FIELDS = ("cys_sulfur_sasa_a2", "met_sulfur_sasa_a2", "hydrophobic_burial_fraction")
 _PROBE_RADIUS = 1.4
+_ATOM_SCOPE = "isolated_canonical_heavy_atom_chain"
 _STRUCTURE_SUFFIXES = {".cif", ".mmcif", ".pdb", ".ent"}
 
 _BACKBONE = {"N", "CA", "C", "O"}
@@ -267,6 +270,8 @@ def describe_structure(
     details: dict | None = None,
     residue_sasa_a2: list[float] | None = None,
     protected_positions: Iterable[int] = (),
+    dssp_executable: str | Path | None = None,
+    dssp_timeout: float = DEFAULT_DSSP_TIMEOUT,
 ) -> dict[str, int | float | None]:
     """Describe one isolated protein chain from a single PDB or mmCIF model.
 
@@ -303,6 +308,10 @@ def describe_structure(
     any usable PDB or mmCIF connection annotation, independent of isolation
     for SASA. Supply 1-based ``protected_positions`` to mark those sites.
     Absence of a connection leaves the sulfur's chemical state unknown.
+
+    Supply ``dssp_executable`` to also score helix ends using mkdssp on the
+    same isolated chain. Use ``groups=()`` for a DSSP-only run without SASA.
+    ``dssp_timeout`` limits the external command in seconds.
     """
     selected = set(groups)
     if unknown := selected.difference(SURFACE_GROUPS):
@@ -322,14 +331,19 @@ def describe_structure(
     if path.suffix.lower() not in _STRUCTURE_SUFFIXES:
         raise ValueError(f"Expected a PDB or mmCIF file, got {path}")
     expected = expected_sequence.strip().upper() if expected_sequence is not None else None
-    protein, sequence, coords, connections = _measure_exposure(path, path.read_text(), chain, expected, sasa_points)
+    measure_sasa = bool(selected) or residue_sasa_a2 is not None or dssp_executable is None
+    content = path.read_text()
+    if measure_sasa:
+        protein, sequence, coords, connections = _measure_exposure(path, content, chain, expected, sasa_points)
+    else:
+        protein, sequence, coords, connections = _validated_chain(path, content, chain, expected)
     protected = validate_positions(protected_positions, len(sequence), "protected residue")
     if residue_sasa_a2 is not None:
         residue_sasa_a2.extend(fsum(atom.sasa for atom in residue) for residue in protein)
     surface_details = None
-    if details is not None:
+    if details is not None and measure_sasa:
         surface_details = {
-            "atom_scope": "isolated_canonical_heavy_atom_chain",
+            "atom_scope": _ATOM_SCOPE,
             "chain": protein.id,
             "sasa_points": sasa_points,
             "probe_radius_a": _PROBE_RADIUS,
@@ -341,6 +355,11 @@ def describe_structure(
         metrics.update(_sap_metrics(protein, sequence, coords, radius))
     if "surface-chemistry" in selected:
         metrics.update(_surface_chemistry(protein, sequence, connections, surface_details, protected))
+    if dssp_executable is not None:
+        assignment = assign_dssp(protein, sequence, executable=dssp_executable, timeout=dssp_timeout)
+        metrics.update(describe_helix(sequence, assignment, details=details))
+        if details is not None:
+            details["helix"].update(assignment_source="dssp", atom_scope=_ATOM_SCOPE)
     return metrics
 
 
@@ -349,6 +368,14 @@ def _measure_exposure(
     path: Path, content: str, chain: str | None, expected: str | None, sasa_points: int,
 ) -> tuple[Chain, str, np.ndarray, tuple[_Connection, ...]]:
     """Cache only private exposure data, keyed by file text and selection."""
+    protein, sequence, coords, connections = _validated_chain(path, content, chain, expected)
+    ShrakeRupley(probe_radius=_PROBE_RADIUS, n_points=sasa_points).compute(protein, level="A")
+    return protein, sequence, coords, connections
+
+
+def _validated_chain(
+    path: Path, content: str, chain: str | None, expected: str | None,
+) -> tuple[Chain, str, np.ndarray, tuple[_Connection, ...]]:
     protein, sequence, connections = _load_protein_chain(path, chain, content)
     if expected is not None and sequence != expected:
         first_difference = next(
@@ -363,7 +390,6 @@ def _measure_exposure(
     coords = np.asarray([atom.coord for atom in protein.get_atoms()], dtype=np.float64)
     if not np.isfinite(coords).all():
         raise ValueError(f"Non-finite coordinates in chain {protein.id!r} of {path}")
-    ShrakeRupley(probe_radius=_PROBE_RADIUS, n_points=sasa_points).compute(protein, level="A")
     return protein, sequence, coords, connections
 
 
