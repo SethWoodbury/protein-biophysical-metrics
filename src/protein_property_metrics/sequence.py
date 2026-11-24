@@ -2,14 +2,17 @@
 
 from collections.abc import Iterable
 from math import log10
+from pathlib import Path
 
 from Bio.Data.IUPACData import protein_letters
 from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
+from .nfive import N_DEGRON_STABILITY_GROUP, describe_n_terminus
+
 DEFAULT_PH = 7.4
 DEFAULT_SEQUENCE_GROUPS = ("composition", "charge", "instability")
-SEQUENCE_GROUPS = (*DEFAULT_SEQUENCE_GROUPS, "optics")
+SEQUENCE_GROUPS = (*DEFAULT_SEQUENCE_GROUPS, "optics", N_DEGRON_STABILITY_GROUP)
 _SEQUENCE_SYMBOLS = frozenset(protein_letters + protein_letters.lower())
 
 
@@ -32,7 +35,8 @@ def describe(
     *,
     groups: Iterable[str] = DEFAULT_SEQUENCE_GROUPS,
     ph: float = DEFAULT_PH,
-) -> dict[str, int | float]:
+    nfive_model: str | Path | None = None,
+) -> dict[str, str | int | float | None]:
     """Calculate the selected descriptor groups in canonical group order.
 
     Composition includes average mass in daltons, Kyte–Doolittle GRAVY,
@@ -44,9 +48,14 @@ def describe(
     residue because the sequence contains no adjacent residue pairs.
     Optics reports the sequence-estimated 280 nm extinction coefficients
     for the fully reduced and maximum disulfide-paired cases.
+    N-degron-stability-index reports the five-residue window and predicted
+    Protein Stability Index (PSI). Lower PSI indicates a more destabilizing
+    N-terminus. MSG starts also get a window and score after Met excision.
+    Missing windows return None. The optional nfive_model is the path to
+    the trusted upstream model, which defaults to the model in the checkout.
     """
     sequence = normalize_sequence(sequence)
-    selected = set(groups)
+    selected = {group.lower() for group in groups}
     unknown = selected.difference(SEQUENCE_GROUPS)
     if unknown:
         raise ValueError(f"unknown sequence descriptor groups ({', '.join(sorted(unknown))})")
@@ -55,7 +64,7 @@ def describe(
         raise ValueError("pH must be finite and within [0, 14]")
 
     analysis = ProteinAnalysis(sequence)
-    metrics: dict[str, int | float] = {}
+    metrics: dict[str, str | int | float | None] = {}
     if "composition" in selected:
         length = len(sequence)
         counts = analysis.count_amino_acids()
@@ -86,4 +95,6 @@ def describe(
         reduced, maximum_paired = analysis.molar_extinction_coefficient()
         metrics["extinction_280_reduced_m_inv_cm_inv"] = reduced
         metrics["extinction_280_max_paired_m_inv_cm_inv"] = maximum_paired
+    if N_DEGRON_STABILITY_GROUP in selected:
+        metrics.update(describe_n_terminus(sequence, model_path=nfive_model))
     return metrics

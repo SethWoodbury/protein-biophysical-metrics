@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 
 from Bio import SeqIO
 
+from .nfive import DEFAULT_MODEL_PATH, N_DEGRON_STABILITY_GROUP
 from .sequence import DEFAULT_PH, DEFAULT_SEQUENCE_GROUPS, SEQUENCE_GROUPS, describe, normalize_sequence
 from .surface import DEFAULT_RADIUS, DEFAULT_SASA_POINTS, describe_structure
 
@@ -30,7 +31,7 @@ class Record:
 
 
 def _groups(value: str) -> tuple[str, ...]:
-    groups = tuple(group.strip() for group in value.split(","))
+    groups = tuple(group.strip().lower() for group in value.split(","))
     allowed = (*SEQUENCE_GROUPS, "sap")
     if any(group not in allowed for group in groups) or len(set(groups)) != len(groups):
         raise argparse.ArgumentTypeError(f"use each group once from {', '.join(allowed)}")
@@ -76,7 +77,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--chain", help="Structure chain ID for a single input record")
     parser.add_argument(
         "--groups", type=_groups, default=DEFAULT_SEQUENCE_GROUPS,
-        help=f"Comma-separated descriptor groups. The default is {','.join(DEFAULT_SEQUENCE_GROUPS)}. Add sap for structures.",
+        help=f"Comma-separated descriptor groups. The default is {','.join(DEFAULT_SEQUENCE_GROUPS)}. "
+        f"Add sap for structures or {N_DEGRON_STABILITY_GROUP} for N-FIVE's predicted PSI. "
+        "Lower PSI indicates a more destabilizing N-terminus.",
+    )
+    parser.add_argument(
+        "--nfive-model", type=Path,
+        help="Path to the trusted N-FIVE WT model.pkl. The default is the model in the submodule source checkout.",
     )
     parser.add_argument("--ph", type=float, default=DEFAULT_PH, help=f"pH for net charge. The default is {DEFAULT_PH}.")
     parser.add_argument(
@@ -149,11 +156,12 @@ def _describe(
     radius: float,
     sasa_points: int,
     contexts: list[tuple[str, str, str]],
-) -> list[dict[str, str | int | float]]:
+    nfive_model: Path | None,
+) -> list[dict[str, str | int | float | None]]:
     sequence_groups = tuple(group for group in groups if group != "sap")
     try:
         sequence = normalize_sequence(record.sequence)
-        properties = describe(sequence, groups=sequence_groups, ph=ph)
+        properties = describe(sequence, groups=sequence_groups, ph=ph, nfive_model=nfive_model)
         base = {"id": record.identifier, "context": BASE_CONTEXT, **properties}
         if "sap" in groups and record.structure is not None:
             surface = describe_structure(
@@ -166,14 +174,14 @@ def _describe(
             base.update(surface)
         rows = [base]
         for name, prefix, suffix in contexts:
-            properties = describe(prefix + sequence + suffix, groups=sequence_groups, ph=ph)
+            properties = describe(prefix + sequence + suffix, groups=sequence_groups, ph=ph, nfive_model=nfive_model)
             rows.append({"id": record.identifier, "context": name, **properties})
     except (OSError, ValueError) as exc:
         raise ValueError(f"record {record.identifier!r}: {exc}") from exc
     return rows
 
 
-def _write_outputs(rows: list[dict[str, str | int | float]], csv_path: Path, jsonl_path: Path | None) -> None:
+def _write_outputs(rows: list[dict[str, str | int | float | None]], csv_path: Path, jsonl_path: Path | None) -> None:
     columns = list(dict.fromkeys(column for row in rows for column in row))
     with ExitStack() as stack:
         staged_csv = Path(stack.enter_context(TemporaryDirectory(dir=csv_path.parent))) / "properties.csv"
@@ -204,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
         jsonl_path = args.jsonl.resolve() if args.jsonl is not None else None
         outputs = [path for path in (csv_path, jsonl_path) if path is not None]
         inputs = {path.resolve() for path in (*structures, args.fasta, args.manifest) if path is not None}
+        if N_DEGRON_STABILITY_GROUP in args.groups:
+            inputs.add((args.nfive_model or DEFAULT_MODEL_PATH).expanduser().resolve())
         if len(set(outputs)) != len(outputs) or inputs.intersection(outputs):
             raise ValueError("output paths must be distinct from each other and from inputs")
         if any(path.exists() and not path.is_file() for path in outputs):
@@ -211,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
 
         describe_record = partial(
             _describe, groups=args.groups, ph=args.ph, radius=args.radius, sasa_points=args.sasa_points,
-            contexts=args.context,
+            contexts=args.context, nfive_model=args.nfive_model,
         )
         if args.workers == 1:
             rows = [row for record in records for row in describe_record(record)]

@@ -1,0 +1,3 @@
+[submodule "vendor/N-terminal-cluster-stability"]
+	path = vendor/N-terminal-cluster-stability
+	url = https://github.com/KunjapurLab/N-terminal-cluster-stability.git

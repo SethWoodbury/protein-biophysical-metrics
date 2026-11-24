@@ -22,6 +22,7 @@ primary output. Use `--jsonl PATH` for a second copy as JSON Lines.
 | `charge` | Theoretical pI, signed and absolute net charge at `--ph`, with free unmodified termini |
 | `instability` | Guruprasad sequence instability index |
 | `optics` | Estimated 280 nm extinction coefficients for reduced and maximum disulfide-paired cases in M⁻¹ cm⁻¹ |
+| `n-degron-stability-index` | Five-residue N-terminal windows and predicted Protein Stability Index (PSI) from N-FIVE. Lower PSI means a more destabilizing N-terminus. |
 | `sap` | Static SAP approximation, total, per-residue and side-chain SASA in Å², Cα radius of gyration in Å, and covered residues |
 
 Choose metric groups with `--groups`. Pass `--context NAME:PREFIX:SUFFIX`
@@ -38,6 +39,37 @@ on the stated disulfide case.
 [Aliphatic index](https://doi.org/10.1093/oxfordjournals.jbchem.a133168) ·
 [Extinction coefficients](https://pmc.ncbi.nlm.nih.gov/articles/PMC2143013/)
 
+### N-degron-stability-index
+
+From the repository root, initialize the pinned Kunjapur Lab submodule and
+install the optional `nfive` dependencies. The Git LFS skip keeps the upstream
+sequencing databases out of the checkout while still fetching the model.
+
+```sh
+GIT_LFS_SKIP_SMUDGE=1 git submodule update --init vendor/N-terminal-cluster-stability
+python -m pip install -e '.[nfive]'
+protein-biophysical-metrics --sequence ACDEFGH --groups N-degron-stability-index --context tagged:MSG: --output stability.csv
+```
+
+Each row reports `n_degron_sequence` and `n_degron_stability_index` for residues
+1–5 of its construct. If the construct starts with `MSG`, it also reports
+`n_degron_sequence_met_excised` and `n_degron_stability_index_met_excised`
+for residues 2–6.
+In the example, the base row scores `ACDEF` and the tagged row scores `MSGAC`
+and `SGACD`. If the input already includes the tag, pass the construct directly.
+Unavailable five-residue windows produce blank CSV cells and JSON `null`s.
+The after-excision score describes the sequence that would be exposed if the
+initiator Met is removed. The index is N-FIVE's predicted PSI in the authors'
+*E. coli* reporter assay. Lower values indicate a more destabilizing N-terminus.
+[N-FIVE source and model](https://github.com/KunjapurLab/N-terminal-cluster-stability) ·
+[Sen et al.](https://doi.org/10.1038/s41467-026-79349-0)
+
+For a non-editable install, set `--nfive-model` to the path of the trusted
+`N-FIVE WT model.pkl` in the submodule. The Python API takes the same path as
+`nfive_model` in `describe(sequence, groups=("n-degron-stability-index",), nfive_model=...)`.
+
+### Static SAP
+
 The static SAP approximation uses atom-centered neighborhoods, accessible
 side-chain surface and a glycine-centered hydrophobicity scale. The default
 SAP radius is 5 Å. SASA uses Shrake–Rupley on the isolated canonical heavy-atom
@@ -53,4 +85,4 @@ definition. [SAP definition](https://doi.org/10.1073/pnas.0904191106) ·
 
 Run the small numerical checks with `python -m unittest discover -s tests -v`
 after installing the package. They cover theoretical pI and charge, optical
-estimates, analytical sphere areas, and PDB/mmCIF parity.
+estimates, N-FIVE windows and encoding, analytical sphere areas, and PDB/mmCIF parity.
