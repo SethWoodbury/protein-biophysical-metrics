@@ -8,7 +8,8 @@ from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
 DEFAULT_PH = 7.4
-SEQUENCE_GROUPS = ("composition", "charge", "instability")
+DEFAULT_SEQUENCE_GROUPS = ("composition", "charge", "instability")
+SEQUENCE_GROUPS = (*DEFAULT_SEQUENCE_GROUPS, "optics")
 _SEQUENCE_SYMBOLS = frozenset(protein_letters + protein_letters.lower())
 
 
@@ -29,17 +30,20 @@ def normalize_sequence(sequence: str) -> str:
 def describe(
     sequence: str,
     *,
-    groups: Iterable[str] = SEQUENCE_GROUPS,
+    groups: Iterable[str] = DEFAULT_SEQUENCE_GROUPS,
     ph: float = DEFAULT_PH,
 ) -> dict[str, int | float]:
     """Calculate the selected descriptor groups in canonical group order.
 
     Composition includes average mass in daltons, Kyte–Doolittle GRAVY,
-    cysteine content, and the aromatic residue fraction (F, W, and Y).
+    cysteine content, aromatic residue fraction (F, W, and Y), and the
+    Ikai aliphatic index.
     Charge uses Biopython's Bjellqvist pKa model with free termini. The
     supplied pH must be finite and within [0, 14]. The Guruprasad instability
     index is a sequence-derived score. Its formula gives zero for a single
     residue because the sequence contains no adjacent residue pairs.
+    Optics reports the sequence-estimated 280 nm extinction coefficients
+    for the fully reduced and maximum disulfide-paired cases.
     """
     sequence = normalize_sequence(sequence)
     selected = set(groups)
@@ -54,7 +58,8 @@ def describe(
     metrics: dict[str, int | float] = {}
     if "composition" in selected:
         length = len(sequence)
-        cysteine_count = sequence.count("C")
+        counts = analysis.count_amino_acids()
+        cysteine_count = counts["C"]
         metrics.update(
             length=length,
             molecular_weight_da=analysis.molecular_weight(),
@@ -62,6 +67,7 @@ def describe(
             cysteine_count=cysteine_count,
             cysteine_fraction=cysteine_count / length,
             aromaticity=analysis.aromaticity(),
+            aliphatic_index=100 * (counts["A"] + 2.9 * counts["V"] + 3.9 * (counts["I"] + counts["L"])) / length,
         )
     if "charge" in selected:
         charge_model = IsoelectricPoint(sequence, analysis.count_amino_acids())
@@ -76,4 +82,8 @@ def describe(
         )
     if "instability" in selected:
         metrics["instability_index"] = analysis.instability_index()
+    if "optics" in selected:
+        reduced, maximum_paired = analysis.molar_extinction_coefficient()
+        metrics["extinction_280_reduced_m_inv_cm_inv"] = reduced
+        metrics["extinction_280_max_paired_m_inv_cm_inv"] = maximum_paired
     return metrics

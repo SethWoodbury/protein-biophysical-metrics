@@ -19,7 +19,7 @@ from Bio.PDB.kdtrees import KDTree
 from Bio.SeqUtils.ProtParamData import bm
 
 DEFAULT_RADIUS = 5.0
-DEFAULT_SASA_POINTS = 100
+DEFAULT_SASA_POINTS = 960
 _PROBE_RADIUS = 1.4
 
 _BACKBONE = {"N", "CA", "C", "O"}
@@ -200,6 +200,7 @@ def describe_structure(
     ``sap_static_max`` is the maximum signed residue score. All SAP values are
     dimensionless. ``surface_total_sasa_a2`` and ``surface_sidechain_sasa_a2``
     report the total and side-chain heavy-atom SASA in Å².
+    ``surface_ca_radius_of_gyration_a`` uses the unweighted Cα centroid.
     """
     if not isfinite(radius) or radius <= 0:
         raise ValueError("radius must be finite and positive")
@@ -250,11 +251,16 @@ def describe_structure(
     residue_scores = [fsum(islice(atom_scores, len(residue))) / len(residue) for residue in protein]
     total = fsum(max(score, 0.0) for score in residue_scores)
     covered = len(residue_scores)
+    ca_coords = np.array([residue["CA"].coord for residue in protein], dtype=np.float64)
+    centered = ca_coords - ca_coords.mean(axis=0)
+    total_sasa = fsum(atom.sasa for atom in atoms)
     return {
         "sap_static_total": total,
         "sap_static_per_residue": total / covered,
         "sap_static_max": max(residue_scores),
         "sap_static_covered_residues": covered,
-        "surface_total_sasa_a2": fsum(atom.sasa for atom in atoms),
+        "surface_total_sasa_a2": total_sasa,
+        "surface_sasa_per_residue_a2": total_sasa / covered,
         "surface_sidechain_sasa_a2": fsum(sidechain_areas),
+        "surface_ca_radius_of_gyration_a": float(np.sqrt(np.square(centered).sum(axis=1).mean())),
     }

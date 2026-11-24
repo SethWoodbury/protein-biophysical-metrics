@@ -15,7 +15,7 @@ from tempfile import TemporaryDirectory
 
 from Bio import SeqIO
 
-from .sequence import DEFAULT_PH, SEQUENCE_GROUPS, describe, normalize_sequence
+from .sequence import DEFAULT_PH, DEFAULT_SEQUENCE_GROUPS, SEQUENCE_GROUPS, describe, normalize_sequence
 from .surface import DEFAULT_RADIUS, DEFAULT_SASA_POINTS, describe_structure
 
 BASE_CONTEXT = "base"
@@ -75,8 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--structure", type=Path, help="PDB or mmCIF file for a single input record")
     parser.add_argument("--chain", help="Structure chain ID for a single input record")
     parser.add_argument(
-        "--groups", type=_groups, default=SEQUENCE_GROUPS,
-        help=f"Comma-separated descriptor groups. The default is {','.join(SEQUENCE_GROUPS)}. Add sap for structures.",
+        "--groups", type=_groups, default=DEFAULT_SEQUENCE_GROUPS,
+        help=f"Comma-separated descriptor groups. The default is {','.join(DEFAULT_SEQUENCE_GROUPS)}. Add sap for structures.",
     )
     parser.add_argument("--ph", type=float, default=DEFAULT_PH, help=f"pH for net charge. The default is {DEFAULT_PH}.")
     parser.add_argument(
