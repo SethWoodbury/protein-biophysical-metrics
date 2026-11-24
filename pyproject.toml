@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protein-property-metrics"
+version = "0.1.0"
+description = "Descriptive sequence and structure metrics for proteins"
+requires-python = ">=3.10"
+dependencies = ["biopython>=1.84", "numpy>=1.24"]
+
+[project.scripts]
+protein-property-metrics = "protein_property_metrics.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
