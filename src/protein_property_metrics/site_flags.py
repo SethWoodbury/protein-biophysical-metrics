@@ -7,20 +7,20 @@ from math import isfinite
 from operator import index
 import re
 
+from .organisms import (
+    CONTEXT_DEPENDENT_PROTEASE,
+    DEFAULT_ORGANISM,
+    WORKFLOW_PROTEASE,
+    OrganismProfile,
+    get_organism,
+)
+
 SITE_FLAGS_GROUP = "site-flags"
 
 _DEAMIDATION_SOURCE = "https://pubmed.ncbi.nlm.nih.gov/1649998/"
 _CHEMICAL_STRESS_SOURCE = "https://pubmed.ncbi.nlm.nih.gov/33475951/"
 _CYCLIZATION_SOURCE = "https://pubmed.ncbi.nlm.nih.gov/21282104/"
 _POLYPROLINE_SOURCE = "https://pubmed.ncbi.nlm.nih.gov/23239624/"
-_TEV_SOURCE = "https://www.neb.com/en-us/products/p8112-tev-protease"
-_WORKFLOW_PROTEASE_SOURCE = (
-    "https://b2b.sigmaaldrich.com/SE/en/technical-documents/"
-    "technical-article/protein-biology/protein-purification/cleavage-enzymes-fusion-protein-purification"
-)
-_CLPX_SOURCE = "https://pmc.ncbi.nlm.nih.gov/articles/PMC517522/"
-_MUA_SOURCE = "https://doi.org/10.1016/j.jmb.2015.03.008"
-_N_END_SOURCE = "https://doi.org/10.1038/s41467-026-79349-0"
 
 _CHEMICAL_COUNTS = ("NG", "DG", "NS")
 _CHEMICAL_FLAGS = {
@@ -33,40 +33,28 @@ _CHEMICAL_PATTERN = re.compile(r"NG|DG|NS|DP")
 _PROLINE_PATTERN = re.compile(r"(?=(PPP|PPG))")
 _PROLINE_RUN = re.compile(r"P+")
 
-_COMPLETE_TAGS = (
-    ("AANDENYALAA", "ssrA-native", "https://doi.org/10.7554/eLife.61496"),
-    ("AANDENYALVA", "ssrA-LVA", "https://doi.org/10.1186/s13036-024-00420-9"),
-    ("AANDENYAAAV", "ssrA-AAV", "https://doi.org/10.1186/s13036-024-00420-9"),
-    ("AANDENYAASV", "ssrA-ASV", "https://doi.org/10.1186/s13036-024-00420-9"),
-)
-_SHORT_TAGS = (
-    ("RRKKAI", _MUA_SOURCE),
-    ("LAA", _CLPX_SOURCE),
-    ("VAA", _CLPX_SOURCE),
-    ("AA", _CLPX_SOURCE),
-)
-
-# A lookahead preserves matches that share recognition residues.
-# Offsets count matched residues up to the P1 residue, before the cut.
-_PROTEASE_RULES = {
-    "tev": (re.compile(r"(?=(ENLYFQ[SGAMCH]))"), 6, _TEV_SOURCE),
-    "hrv-3c": (re.compile(r"(?=(LEVLFQGP))"), 6, _WORKFLOW_PROTEASE_SOURCE),
-    "thrombin": (re.compile(r"(?=(LVPRGS))"), 4, _WORKFLOW_PROTEASE_SOURCE),
-    "enterokinase": (re.compile(r"(?=(DDDDK[^P]))"), 5, _WORKFLOW_PROTEASE_SOURCE),
-    "factor-xa": (re.compile(r"(?=(I[ED]GR[^PR]))"), 4, _WORKFLOW_PROTEASE_SOURCE),
-}
-
-
-def normalize_proteases(proteases_used: Iterable[str] | str) -> tuple[str, ...]:
-    """Validate the selected workflow enzymes and retain their input order."""
+def normalize_proteases(
+    proteases_used: Iterable[str] | str | None = None,
+    *,
+    organism: str | OrganismProfile = DEFAULT_ORGANISM,
+) -> tuple[str, ...]:
+    """Resolve host defaults or an explicit ordered enzyme selection."""
+    profile = get_organism(organism)
+    if proteases_used is None:
+        proteases_used = profile.default_proteases
     if isinstance(proteases_used, str):
         proteases_used = proteases_used.split(",") if proteases_used.strip() else ()
     selected = {}
     for name in proteases_used:
         canonical = name.strip().lower().replace(" ", "-") if isinstance(name, str) else None
-        if canonical not in _PROTEASE_RULES:
-            raise ValueError(f"unknown workflow protease {name!r}. Choose from {', '.join(_PROTEASE_RULES)}")
+        if canonical != "none" and canonical not in profile.proteases:
+            choices = ", ".join((*profile.proteases, "none"))
+            raise ValueError(f"unknown protease {name!r} for {profile.name}. Choose from {choices}.")
         selected[canonical] = None
+    if "none" in selected:
+        if len(selected) > 1:
+            raise ValueError("use 'none' alone to disable protease scanning")
+        return ()
     return tuple(selected)
 
 
@@ -111,7 +99,8 @@ def _site(
 def describe_sites(
     sequence: str,
     *,
-    proteases_used: Iterable[str] | str = (),
+    proteases_used: Iterable[str] | str | None = None,
+    organism: str | OrganismProfile = DEFAULT_ORGANISM,
     intended_cuts: Iterable[int] = (),
     protected_positions: Iterable[int] = (),
     mature_n_terminus: bool = False,
@@ -124,13 +113,16 @@ def describe_sites(
     Intended cuts are indexed by their P1 residue. Protection and site intervals
     use 1-based sequence coordinates. Optional total residue SASA is supplied in
     sequence order. A true mature_n_terminus declares the first residue exposed.
+    Omitted proteases use the host defaults. An empty selection disables scans.
+    Workflow recognition motifs and context-dependent candidates are counted separately.
     """
     length = len(sequence)
     if not length:
         raise ValueError("sequence is empty")
     if not isinstance(mature_n_terminus, bool) or not isinstance(free_c_terminus, bool):
         raise ValueError("terminal declarations must be Boolean")
-    selected = normalize_proteases(proteases_used)
+    profile = get_organism(organism)
+    selected = normalize_proteases(proteases_used, organism=profile)
     intended_positions = validate_positions(intended_cuts, length - 1, "intended cut")
     protected = validate_positions(protected_positions, length, "protected residue")
     exposure = None
@@ -159,12 +151,11 @@ def describe_sites(
         if mature_n_terminus and first in "QE":
             sites.append(site(f"N-terminal-{first}", "chemical_annotation", first, 1, _CYCLIZATION_SOURCE,
                               interpretation="Possible N-terminal cyclization"))
-        if mature_n_terminus and first in "FLWY":
-            sites.append(site("ClpS-primary", "n_end_signal", first, 1, _N_END_SOURCE,
-                              system="ClpS", interpretation="Classical ClpS-recognized N-end residue"))
-        if mature_n_terminus and first in "RK":
-            sites.append(site("N-end-secondary", "n_end_signal", first, 1, _N_END_SOURCE,
-                              system="LFTR", interpretation="Secondary signal requiring modification"))
+        if mature_n_terminus:
+            for rule in profile.n_end_degrons:
+                if first in rule.motif:
+                    sites.append(site(rule.motif_id, "n_end_signal", first, 1, rule.source,
+                                      system=rule.system, interpretation=rule.interpretation))
 
     clusters = []
     cluster_count = 0
@@ -188,39 +179,38 @@ def describe_sites(
     complete = None
     minor = None
     if free_c_terminus:
-        complete = next((tag for tag in _COMPLETE_TAGS if sequence.endswith(tag[0])), None)
+        complete = next((rule for rule in profile.complete_degrons if sequence.endswith(rule.motif)), None)
         if complete is None:
-            minor = next((tag for tag in _SHORT_TAGS if sequence.endswith(tag[0])), None)
+            minor = next((rule for rule in profile.short_degrons if sequence.endswith(rule.motif)), None)
     metrics.update(degron_tag_count=int(complete is not None), degron_motif_count=int(minor is not None))
-    if details is not None and complete is not None:
-        matched, motif_id, source = complete
-        sites.append(site(motif_id, "major", matched, length - len(matched) + 1, source,
-                          system="ClpXP", interpretation="Complete C-terminal ssrA tag"))
-    if details is not None and minor is not None:
-        matched, source = minor
-        interpretation = (
-            "MuA-type signal whose recognition depends on additional contacts and context"
-            if matched == "RRKKAI" else "Context-dependent C-terminal ClpX recognition motif"
-        )
-        sites.append(site(matched, "minor", matched, length - len(matched) + 1, source,
-                          system="ClpX", interpretation=interpretation))
+    terminal_rule = complete or minor
+    if details is not None and terminal_rule is not None:
+        sites.append(site(
+            terminal_rule.motif_id, "major" if complete else "minor", terminal_rule.motif,
+            length - len(terminal_rule.motif) + 1, terminal_rule.source,
+            system=terminal_rule.system, interpretation=terminal_rule.interpretation,
+        ))
 
-    unexpected = set()
+    unexpected: dict[str, set[int]] = {}
     for enzyme in selected:
-        pattern, offset, source = _PROTEASE_RULES[enzyme]
-        for match in pattern.finditer(sequence):
-            cut = match.start(1) + offset
+        rule = profile.proteases[enzyme]
+        bonds = unexpected.setdefault(rule.category, set())
+        for match in rule.pattern.finditer(sequence):
+            cut = match.start(1) + rule.cut_offset
             is_intended = cut in intended_positions
             if not is_intended:
-                unexpected.add(cut)
+                bonds.add(cut)
             if details is not None:
-                sites.append(site(enzyme, "workflow_protease", match[1], match.start(1) + 1, source,
+                sites.append(site(enzyme, rule.category, match[1], match.start(1) + 1, rule.source,
                                   protease=enzyme, cleavage_after=cut, intended=is_intended,
-                                  interpretation="Workflow-protease recognition motif"))
-    metrics["protease_cut_site_count"] = len(unexpected) if selected else None
+                                  interpretation=rule.interpretation))
+    metrics["protease_cut_site_count"] = len(unexpected[WORKFLOW_PROTEASE]) if WORKFLOW_PROTEASE in unexpected else None
+    if CONTEXT_DEPENDENT_PROTEASE in unexpected:
+        metrics["context_dependent_protease_site_count"] = len(unexpected[CONTEXT_DEPENDENT_PROTEASE])
 
     if details is not None:
         details["site_flags"] = {
+            "organism": profile.name,
             "sites": sites,
             "category_counts": dict(Counter(item["bin"] for item in sites)),
             "polyproline_clusters": clusters,

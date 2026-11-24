@@ -12,13 +12,15 @@ from Bio.SeqUtils.ProtParam import ProteinAnalysis
 from .aggrescan import AGGRESCAN_GROUP, describe_aggrescan
 from .helix import HELIX_GROUP, describe_helix
 from .nfive import N_DEGRON_STABILITY_GROUP, describe_n_terminus
+from .organisms import DEFAULT_ORGANISM, OrganismProfile, get_organism
+from .pi_typicality import PI_TYPICALITY_GROUP, describe_pi_typicality
 from .site_flags import SITE_FLAGS_GROUP, describe_sites, validate_positions
 
 DEFAULT_PH = 7.4
 DEFAULT_SEQUENCE_GROUPS = ("composition", "charge", "instability")
 SEQUENCE_GROUPS = (
     *DEFAULT_SEQUENCE_GROUPS, "optics", N_DEGRON_STABILITY_GROUP,
-    "swi", SITE_FLAGS_GROUP, AGGRESCAN_GROUP, HELIX_GROUP,
+    "swi", SITE_FLAGS_GROUP, AGGRESCAN_GROUP, HELIX_GROUP, PI_TYPICALITY_GROUP,
 )
 _SEQUENCE_SYMBOLS = frozenset(protein_letters + protein_letters.lower())
 
@@ -65,9 +67,10 @@ def describe(
     *,
     groups: Iterable[str] = DEFAULT_SEQUENCE_GROUPS,
     ph: float = DEFAULT_PH,
+    organism: str | OrganismProfile = DEFAULT_ORGANISM,
     nfive_model: str | Path | None = None,
     nfive_lookup: str | Path | None = None,
-    proteases_used: Iterable[str] | str = (),
+    proteases_used: Iterable[str] | str | None = None,
     intended_cuts: Iterable[int] = (),
     protected_positions: Iterable[int] = (),
     mature_n_terminus: bool = False,
@@ -94,8 +97,11 @@ def describe(
     the trusted upstream model, which defaults to the model in the checkout.
     Supply nfive_lookup to use a matching, precomputed fixed-MSG lookup.
 
+    The organism profile supplies the pI reference cohort, degron rules, and
+    protease settings. The pI-typicality group gives a local-density percentile.
     SWI is the mean of the original residue solubility weights. Site flags
-    describe chemical, proline, degron and selected workflow-protease motifs.
+    include chemical, proline and protease motifs. A None proteases_used uses
+    the profile defaults. Pass an empty iterable to disable protease scanning.
     Intended cuts identify the residue before each bond, and protected
     positions identify residues. Both use 1-based coordinates. Declare
     mature_n_terminus for an exposed mature N-end and set free_c_terminus
@@ -105,7 +111,8 @@ def describe(
     """
     annotations = SiteAnnotations(tuple(intended_cuts), tuple(protected_positions), mature_n_terminus, free_c_terminus)
     return _describe_normalized(
-        normalize_sequence(sequence), groups=groups, ph=ph, nfive_model=nfive_model, nfive_lookup=nfive_lookup,
+        normalize_sequence(sequence), groups=groups, ph=ph, organism=organism,
+        nfive_model=nfive_model, nfive_lookup=nfive_lookup,
         proteases_used=proteases_used, annotations=annotations, secondary_structure=secondary_structure,
         residue_sasa_a2=residue_sasa_a2, details=details,
     )
@@ -116,10 +123,11 @@ def _describe_normalized(
     *,
     groups: Iterable[str],
     ph: float,
+    organism: str | OrganismProfile = DEFAULT_ORGANISM,
     nfive_model: str | Path | None = None,
     nfive_lookup: str | Path | None = None,
     nfive_scores: Mapping[str, float] | None = None,
-    proteases_used: Iterable[str] | str = (),
+    proteases_used: Iterable[str] | str | None = None,
     annotations: SiteAnnotations = SiteAnnotations(),
     secondary_structure: str | None = None,
     residue_sasa_a2: Sequence[float | None] | None = None,
@@ -132,9 +140,10 @@ def _describe_normalized(
     ph = float(ph)
     if not 0.0 <= ph <= 14.0:
         raise ValueError("pH must be finite and within [0, 14]")
+    profile = get_organism(organism)
 
     analysis = ProteinAnalysis(sequence)
-    counts = analysis.count_amino_acids() if selected & {"composition", "charge", "swi"} else {}
+    counts = analysis.count_amino_acids() if selected & {"composition", "charge", "swi", PI_TYPICALITY_GROUP} else {}
     metrics: dict[str, MetricValue] = {}
     if "composition" in selected:
         length = len(sequence)
@@ -149,17 +158,17 @@ def _describe_normalized(
             aromaticity=analysis.aromaticity(),
             aliphatic_index=100 * (counts["A"] + 2.9 * counts["V"] + 3.9 * (counts["I"] + counts["L"])) / length,
         )
-    if "charge" in selected:
+    if selected & {"charge", PI_TYPICALITY_GROUP}:
         charge_model = IsoelectricPoint(sequence, counts)
-        net_charge = charge_model.charge_at_pH(ph)
         # Extend the pI search by one decade beyond the maximum residue count.
         # This brackets the zero of the charge model for highly biased sequences.
         margin = log10(len(sequence) + 1) + 1
-        metrics.update(
-            isoelectric_point=charge_model.pi(pH=7.0, min_=-margin, max_=14.0 + margin),
-            net_charge=net_charge,
-            absolute_net_charge=abs(net_charge),
-        )
+        pi = charge_model.pi(pH=7.0, min_=-margin, max_=14.0 + margin)
+        if "charge" in selected:
+            net_charge = charge_model.charge_at_pH(ph)
+            metrics.update(isoelectric_point=pi, net_charge=net_charge, absolute_net_charge=abs(net_charge))
+        if PI_TYPICALITY_GROUP in selected:
+            metrics["pI_typicality_percentile"] = describe_pi_typicality(pi, profile, details=details)
     if "instability" in selected:
         metrics["instability_index"] = analysis.instability_index()
     if "optics" in selected:
@@ -167,6 +176,8 @@ def _describe_normalized(
         metrics["extinction_280_reduced_m_inv_cm_inv"] = reduced
         metrics["extinction_280_max_paired_m_inv_cm_inv"] = maximum_paired
     if N_DEGRON_STABILITY_GROUP in selected:
+        if not profile.nfive_supported:
+            raise ValueError(f"{profile.name} has no registered N-FIVE model")
         metrics.update(describe_n_terminus(
             sequence, model_path=nfive_model, lookup_path=nfive_lookup, prepared_scores=nfive_scores,
         ))
@@ -174,7 +185,7 @@ def _describe_normalized(
         metrics["swi_solubility_index"] = fsum(counts[aa] * weight for aa, weight in _SWI_WEIGHTS.items()) / len(sequence)
     if SITE_FLAGS_GROUP in selected:
         metrics.update(describe_sites(
-            sequence, proteases_used=proteases_used, intended_cuts=annotations.intended_cuts,
+            sequence, organism=profile, proteases_used=proteases_used, intended_cuts=annotations.intended_cuts,
             protected_positions=annotations.protected_positions, mature_n_terminus=annotations.mature_n_terminus,
             free_c_terminus=annotations.free_c_terminus, residue_sasa_a2=residue_sasa_a2, details=details,
         ))

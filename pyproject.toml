@@ -23,3 +23,6 @@ protein-property-metrics = "protein_property_metrics.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+protein_property_metrics = ["references/*.json"]

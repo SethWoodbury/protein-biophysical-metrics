@@ -47,7 +47,7 @@ class AddedMetricsTests(TestCase):
         self.assertEqual(base["details"]["sequence"], "MSGNGQ")
         self.assertEqual(context["details"]["sequence"], "MSGAANGQLAA")
         self.assertIsNone(context["cys_sulfur_sasa_a2"])
-        self.assertIsNone(context["protease_cut_site_count"])
+        self.assertEqual(context["protease_cut_site_count"], 0)
         site_details = context["details"]["site_flags"]
         self.assertEqual(context["details"]["protected_positions"], [6])
         self.assertEqual(site_details["protected_positions"], [6])

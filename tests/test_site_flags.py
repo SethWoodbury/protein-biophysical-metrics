@@ -1,9 +1,9 @@
 """Checks for construct-relative site flags and compact occurrence counts."""
 
+from dataclasses import replace
 from unittest import TestCase
-from unittest.mock import patch
 
-from protein_property_metrics import site_flags
+from protein_property_metrics.organisms import DEFAULT_ORGANISM, OrganismProfile, get_organism
 from protein_property_metrics.site_flags import describe_sites
 
 
@@ -113,7 +113,7 @@ class SiteFlagTests(TestCase):
             32: ("factor-xa", "IEGRV", False, False),
         })
         self.assertEqual(result["protease_cut_site_count"], 3)
-        self.assertIsNone(describe_sites(sequence)["protease_cut_site_count"])
+        self.assertIsNone(describe_sites(sequence, proteases_used=())["protease_cut_site_count"])
         self.assertEqual(describe_sites("AAA", proteases_used=("tev",))["protease_cut_site_count"], 0)
 
     def test_overlapping_protease_matches_and_unique_bonds(self):
@@ -123,13 +123,54 @@ class SiteFlagTests(TestCase):
         self.assertEqual(result["protease_cut_site_count"], 2)
         self.assertEqual([site["cleavage_after"] for site in details["site_flags"]["sites"]], [5, 10])
         # Two rules share the same offset and match here to exercise deduplication.
-        with patch.dict(site_flags._PROTEASE_RULES, {"tev": site_flags._PROTEASE_RULES["enterokinase"]}):
-            result = describe_sites(
-                sequence, proteases_used=("tev", "enterokinase"), intended_cuts=(5,), details=details,
-            )
+        profile = get_organism(DEFAULT_ORGANISM)
+        rules = dict(profile.proteases, tev=profile.proteases["enterokinase"])
+        result = describe_sites(
+            sequence, organism=replace(profile, proteases=rules),
+            proteases_used=("tev", "enterokinase"), intended_cuts=(5,), details=details,
+        )
         self.assertEqual(result["protease_cut_site_count"], 1)
         hits = details["site_flags"]["sites"]
         self.assertEqual({site["protease"] for site in hits if site["cleavage_after"] == 10}, {"tev", "enterokinase"})
+
+    def test_bl21_default_tev_and_optional_ompt_candidates(self):
+        sequence = "AENLYFQGAKKRRA"
+        details = {}
+        result = describe_sites(sequence, details=details)
+        self.assertEqual(result["protease_cut_site_count"], 1)
+        self.assertNotIn("context_dependent_protease_site_count", result)
+        flags = details["site_flags"]
+        self.assertEqual(flags["organism"], DEFAULT_ORGANISM)
+        self.assertEqual(flags["proteases_used"], ["tev"])
+        tev, = flags["sites"]
+        self.assertEqual(tev["bin"], "workflow_protease")
+
+        result = describe_sites(sequence, proteases_used="TEV,OmpT", intended_cuts=(11,), details=details)
+        self.assertEqual(result["protease_cut_site_count"], 1)
+        self.assertEqual(result["context_dependent_protease_site_count"], 2)
+        candidates = [site for site in details["site_flags"]["sites"] if site["protease"] == "ompt"]
+        self.assertEqual([site["matched_sequence"] for site in candidates], ["KK", "KR", "RR"])
+        self.assertEqual([site["cleavage_after"] for site in candidates], [10, 11, 12])
+        self.assertEqual([site["intended"] for site in candidates], [False, True, False])
+        self.assertTrue(all(site["bin"] == "context_dependent_protease" for site in candidates))
+
+        result = describe_sites(sequence, proteases_used="ompt")
+        self.assertIsNone(result["protease_cut_site_count"])
+        self.assertEqual(result["context_dependent_protease_site_count"], 3)
+        self.assertEqual(describe_sites("AA", proteases_used="ompt")["context_dependent_protease_site_count"], 0)
+        self.assertIsNone(describe_sites(sequence, proteases_used="NONE")["protease_cut_site_count"])
+
+    def test_organism_specific_rules_can_be_replaced(self):
+        profile = OrganismProfile(name="other_host")
+        details = {}
+        result = describe_sites("FENLYFQGAANDENYALAA", organism=profile, mature_n_terminus=True, details=details)
+        self.assertEqual(result["degron_tag_count"], 0)
+        self.assertIsNone(result["protease_cut_site_count"])
+        self.assertEqual(details["site_flags"]["organism"], "other_host")
+        self.assertEqual(details["site_flags"]["sites"], [])
+        self.assertEqual(get_organism("bl21_de3_e_coli"), get_organism(DEFAULT_ORGANISM))
+        with self.assertRaisesRegex(ValueError, "unknown organism"):
+            get_organism("unsupported")
 
     def test_required_following_residues_and_specificity(self):
         for residue in "SGAMCH":
@@ -152,7 +193,8 @@ class SiteFlagTests(TestCase):
             {"intended_cuts": (3,)},
             {"protected_positions": (0,)},
             {"protected_positions": (True,)},
-            {"proteases_used": "ompT"},
+            {"proteases_used": "unsupported"},
+            {"proteases_used": "none,tev"},
             {"residue_sasa_a2": [1.0, 2.0]},
             {"residue_sasa_a2": [1.0, float("nan"), 2.0]},
         ):

@@ -19,6 +19,8 @@ from Bio import SeqIO
 from .nfive import (
     DEFAULT_MODEL_PATH, MET_EXCISION_PREFIX, N_DEGRON_STABILITY_GROUP, nfive_windows, prepare_nfive_scores,
 )
+from .organisms import DEFAULT_ORGANISM, ORGANISMS, get_organism
+from .pi_typicality import PI_TYPICALITY_GROUP
 from .sequence import (
     DEFAULT_PH, DEFAULT_SEQUENCE_GROUPS, SEQUENCE_GROUPS, SiteAnnotations, _describe_normalized, normalize_sequence,
 )
@@ -119,6 +121,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--structure", type=Path, help="PDB or mmCIF file for a single input record")
     parser.add_argument("--chain", help="Structure chain ID for a single input record")
     parser.add_argument(
+        "--organism", default=DEFAULT_ORGANISM,
+        help=f"Registered host profile. Available profiles are {', '.join(ORGANISMS)}. Default is {DEFAULT_ORGANISM}.",
+    )
+    parser.add_argument(
         "--groups", type=_groups, default=DEFAULT_SEQUENCE_GROUPS,
         help=f"Comma-separated groups from {', '.join((*SEQUENCE_GROUPS, *SURFACE_GROUPS))}. "
         f"The default is {','.join(DEFAULT_SEQUENCE_GROUPS)}. "
@@ -142,7 +148,10 @@ def _parser() -> argparse.ArgumentParser:
         "--context", metavar="NAME:PREFIX:SUFFIX", action="append", type=_context, default=[],
         help="Add a named context. Use MSG+INSERT as the prefix to insert after an existing MSG. May be repeated.",
     )
-    parser.add_argument("--proteases-used", help="Comma-separated workflow proteases for site-flags.")
+    parser.add_argument(
+        "--proteases-used",
+        help="Override the host's protease list for site-flags with comma-separated names or 'none'.",
+    )
     parser.add_argument("--intended-cuts", help="Comma-separated 1-based positions immediately before intended cuts.")
     parser.add_argument("--protected-positions", help="Comma-separated 1-based protected residue positions.")
     parser.add_argument(
@@ -283,6 +292,7 @@ def _describe(
     ph: float,
     radius: float,
     sasa_points: int,
+    organism: str,
     proteases_used: tuple[str, ...],
     include_details: bool,
 ) -> list[dict[str, object]]:
@@ -291,7 +301,7 @@ def _describe(
     rows = []
     for record in records:
         try:
-            details = {"sequence": record.sequence} if include_details else None
+            details = {"sequence": record.sequence, "organism": organism} if include_details else None
             surface = dict.fromkeys(SURFACE_CHEMISTRY_FIELDS) if "surface-chemistry" in surface_groups else {}
             exposure = None
             if surface_groups and record.structure is not None:
@@ -305,7 +315,7 @@ def _describe(
             elif details is not None and "surface-chemistry" in surface_groups:
                 details["surface"] = {"reason": "structure_unavailable"}
             properties = _describe_normalized(
-                record.sequence, groups=sequence_groups, ph=ph, nfive_scores=nfive_scores,
+                record.sequence, groups=sequence_groups, ph=ph, organism=organism, nfive_scores=nfive_scores,
                 annotations=record.annotations, proteases_used=proteases_used, secondary_structure=record.secondary_structure,
                 residue_sasa_a2=exposure, details=details,
             )
@@ -346,9 +356,14 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("context names must be unique")
         if args.details and args.jsonl is None:
             raise ValueError("--details requires --jsonl")
-        proteases_used = normalize_proteases(args.proteases_used or ())
-        if proteases_used and SITE_FLAGS_GROUP not in args.groups:
+        profile = get_organism(args.organism)
+        if args.proteases_used is not None and SITE_FLAGS_GROUP not in args.groups:
             raise ValueError(f"--proteases-used requires the {SITE_FLAGS_GROUP} group")
+        if N_DEGRON_STABILITY_GROUP in args.groups and not profile.nfive_supported:
+            raise ValueError(f"{profile.name} has no registered N-FIVE model")
+        if PI_TYPICALITY_GROUP in args.groups and profile.pi_reference is None:
+            raise ValueError(f"{profile.name} has no pI reference cohort")
+        proteases_used = normalize_proteases(args.proteases_used, organism=profile) if SITE_FLAGS_GROUP in args.groups else ()
         records = _records(args)
         structures = {record.structure for record in records if record.structure is not None}
         if "sap" in args.groups and not structures:
@@ -386,7 +401,7 @@ def main(argv: list[str] | None = None) -> int:
             record_scores = repeat(None, len(constructs))
         describe_record = partial(
             _describe, groups=args.groups, ph=args.ph, radius=args.radius, sasa_points=args.sasa_points,
-            proteases_used=proteases_used, include_details=args.details,
+            organism=profile.name, proteases_used=proteases_used, include_details=args.details,
         )
         if args.workers == 1:
             rows = [

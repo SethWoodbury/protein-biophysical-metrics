@@ -20,11 +20,12 @@ their construct-relative coordinates. Plain `--jsonl PATH` writes scalar rows.
 |---|---|
 | `composition` | Length, average molecular weight in Da, GRAVY, cysteine content, `methionine_count`, aromaticity, and aliphatic index |
 | `charge` | Theoretical pI, signed and absolute net charge at `--ph`, with free unmodified termini |
+| `pi-typicality` | `pI_typicality_percentile` (0–100), the local density rank of the construct's pI in the selected host's reference cohort. Higher means more typical. |
 | `instability` | Guruprasad sequence instability index |
 | `optics` | Estimated 280 nm extinction coefficients for reduced and maximum disulfide-paired cases in M⁻¹ cm⁻¹ |
 | `n-degron-stability-index` | Five-residue N-terminal windows and predicted Protein Stability Index (PSI) from N-FIVE. Lower PSI means a more destabilizing N-terminus. |
 | `swi` | `swi_solubility_index`, the unitless sequence mean of the original SWI weights. Higher means higher model soluble propensity. |
-| `site-flags` | `ng_count`, `dg_count`, `ns_count`, `polyproline_cluster_count`, `degron_tag_count`, `degron_motif_count`, and optional `protease_cut_site_count`. All are counts. |
+| `site-flags` | `ng_count`, `dg_count`, `ns_count`, `polyproline_cluster_count`, `degron_tag_count`, `degron_motif_count`, workflow `protease_cut_site_count`, and opt-in `context_dependent_protease_site_count`. |
 | `aggrescan` | `aggrescan_na4vss`, normalized global profile score, and `aggrescan_thsar`, hotspot area per residue in model units. Higher means greater model aggregation propensity. |
 | `helix` | `helix_end_charge_compatibility`, mean C-end charge minus mean N-end charge over eligible helices, in elementary-charge units per residue. |
 | `sap` | Static SAP approximation, total, per-residue and side-chain SASA in Å², Cα radius of gyration in Å, and covered residues |
@@ -47,6 +48,40 @@ on the stated disulfide case.
 [pI model](https://doi.org/10.1002/elps.11501401163) ·
 [Aliphatic index](https://doi.org/10.1093/oxfordjournals.jbchem.a133168) ·
 [Extinction coefficients](https://pmc.ncbi.nlm.nih.gov/articles/PMC2143013/)
+
+### Organism profiles and pI typicality
+
+`--organism BL21_DE3_e_coli` is the default profile. It selects the host's
+degron rules, protease settings, N-FIVE availability, and pI reference. Use
+`--groups charge,pi-typicality` to get both the theoretical pI and the
+percentile. Python uses the same profile via `describe(..., organism="BL21_DE3_e_coli")`.
+
+The pI reference has 372 unique sequences from the BL21(DE3) UniParc
+proteome, using exact sequence matches to reviewed K-12 entries annotated
+exclusively as cytoplasmic. This subset favors conserved proteins with
+available annotations. Query and reference pIs use the same Bjellqvist
+free-termini calculation. For each pI, the scorer counts the reference
+values within ±0.25 pH units. The percentile is the percent of native
+pIs whose own neighborhood count is at most the query's, including ties.
+This compares local density across acidic and basic pI ranges. Scoring uses
+the bundled cohort offline. Details identify the reference and its release.
+[BL21(DE3) proteome](https://www.uniprot.org/proteomes/UP000002032) ·
+[K-12 proteome annotations](https://www.uniprot.org/proteomes/UP000000625) ·
+[Proteome pI distributions](https://genome.cshlp.org/content/11/5/703)
+
+The bundled cohort records source accessions, input SHA256 hashes, the
+pI model, and UniProt release `2026_04`. The source data are attributed to
+the UniProt Consortium under CC BY 4.0. Rebuild that cohort with
+`python scripts/build_bl21_pi_reference.py --help` using the same-release
+[BL21 UniParc FASTA](https://rest.uniprot.org/uniparc/stream?query=upid%3AUP000002032&format=fasta)
+and [reviewed K-12 cytoplasm JSON](https://rest.uniprot.org/uniprotkb/stream?query=proteome%3AUP000000625%20AND%20cc_scl_term%3ASL-0086%20AND%20reviewed%3Atrue&format=json&fields=accession%2Csequence%2Ccc_subcellular_location).
+[UniProt license](https://www.uniprot.org/help/license)
+
+To add another host, register an `OrganismProfile` in `organisms.py` with
+its supported proteases and degron rules and its own reference file under
+`references/`. Reference records list the host sequence ID, annotation
+accession, and theoretical pI. The host can enable N-FIVE when the published
+model applies. The general sequence and structure metrics are shared.
 
 ### Sequence metrics and site details
 
@@ -79,18 +114,28 @@ free-end default. The match counts describe sequence context.
 [C-terminal ClpX signals](https://pmc.ncbi.nlm.nih.gov/articles/PMC517522/) ·
 [MuA recognition](https://doi.org/10.1016/j.jmb.2015.03.008)
 
-`--proteases-used tev,hrv-3c,thrombin,enterokinase,factor-xa` accepts any
-subset of the listed workflow enzymes. The optional count is blank/null
-when none are selected. For a selected set it counts distinct unexpected
-canonical cleavage bonds, including a zero for a complete scan with no such
-matches. Details keep enzyme identities and intended matches. The registry
-covers the stated recognition motifs, and off-target cleavage can occur
-outside these patterns. Positions are 1-based. Intended cuts name the residue
-immediately before the bond. Protected positions stay counted and are marked
-in details. Contexts shift input positions for residues and bonds that remain.
-Annotate a bond introduced by a prefix or suffix on its own full-construct row.
+`site-flags` checks TEV motifs by default in the BL21(DE3) profile. Use
+`--proteases-used none` to disable protease scans, or select an explicit set
+from `tev,hrv-3c,thrombin,enterokinase,factor-xa,ompt`. The explicit list
+replaces the default. `protease_cut_site_count` counts distinct unexpected
+canonical bonds for selected workflow enzymes and is blank/null if none
+are selected. OmpT is opt-in because ordinary BL21(DE3) is OmpT-deficient.
+Use `--proteases-used tev,ompt` to keep TEV and also report potential OmpT
+dibasic bonds (`RR`, `RK`, `KR`, `KK`) separately in
+`context_dependent_protease_site_count`. Both counts return zero after an
+enabled scan with no unexpected matches. These are motif matches, and actual
+cleavage depends on enzyme exposure and substrate context. The registry
+covers canonical motifs, and off-target cleavage can occur outside them.
+
+Details keep enzyme identities and intended matches. Positions are 1-based.
+Intended cuts name the residue immediately before the bond. Protected
+positions stay counted and are marked in details. Contexts shift input
+positions for residues and bonds that remain. Annotate a bond introduced by
+a prefix or suffix on its own full-construct row.
 [TEV specificity](https://www.neb.com/en-us/products/p8112-tev-protease) ·
-[Workflow enzyme specificities](https://b2b.sigmaaldrich.com/SE/en/technical-documents/technical-article/protein-biology/protein-purification/cleavage-enzymes-fusion-protein-purification)
+[Workflow enzyme specificities](https://b2b.sigmaaldrich.com/SE/en/technical-documents/technical-article/protein-biology/protein-purification/cleavage-enzymes-fusion-protein-purification) ·
+[OmpT specificity](https://pmc.ncbi.nlm.nih.gov/articles/PMC516829/) ·
+[BL21 genotype](https://www.neb.com/en-us/faqs/what-is-the-difference-between-bl21-and-bl21-de3-competent-e-coli-cells)
 
 For per-row declarations, optional manifest columns are `intended_cuts`,
 `protected_positions`, `mature_n_terminus`, `free_c_terminus`, and
